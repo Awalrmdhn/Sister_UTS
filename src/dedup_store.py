@@ -1,70 +1,60 @@
 # src/dedup_store.py
 import sqlite3
 import os
-from datetime import datetime
+import threading
 
 class DedupStore:
     def __init__(self, db_path="data/dedup.db"):
-        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        # check_same_thread=False allows usage from multiple threads/coroutines
-        self.conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
-        # durability settings
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA synchronous=FULL;")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.lock = threading.Lock()
         self._init_table()
 
     def _init_table(self):
         with self.conn:
             self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS processed_events (
-                topic TEXT NOT NULL,
-                event_id TEXT NOT NULL,
-                processed_at TEXT NOT NULL,
-                PRIMARY KEY (topic, event_id)
-            )""")
-            # optional: store processed payloads for GET /events
-            self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS events_store (
-                topic TEXT NOT NULL,
-                event_id TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                source TEXT,
-                payload TEXT,
-                PRIMARY KEY (topic, event_id)
-            )""")
-
-    def mark_processed(self, topic: str, event_id: str, processed_at: str, timestamp_iso: str, source: str, payload_text: str) -> bool:
-        """
-        Try to insert into processed_events (atomic). If success -> also insert into events_store.
-        Returns True if newly processed, False if duplicate.
-        """
-        try:
-            with self.conn:
-                self.conn.execute(
-                    "INSERT INTO processed_events(topic, event_id, processed_at) VALUES (?, ?, ?)",
-                    (topic, event_id, processed_at)
+                CREATE TABLE IF NOT EXISTS events (
+                    topic TEXT,
+                    event_id TEXT,
+                    processed_at TEXT,
+                    timestamp TEXT,
+                    source TEXT,
+                    payload TEXT,
+                    PRIMARY KEY (topic, event_id)
                 )
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO events_store(topic, event_id, timestamp, source, payload) VALUES (?, ?, ?, ?, ?)",
-                    (topic, event_id, timestamp_iso, source, payload_text)
-                )
-            return True
-        except sqlite3.IntegrityError:
-            return False
+            """)
 
-    def get_events(self, topic: str = None):
-        cur = self.conn.cursor()
+    def mark_processed(self, topic, event_id, processed_at, timestamp, source, payload):
+        """Return True if new, False if duplicate"""
+        with self.lock:
+            try:
+                with self.conn:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO events (topic, event_id, processed_at, timestamp, source, payload) VALUES (?, ?, ?, ?, ?, ?)",
+                        (topic, event_id, processed_at, timestamp, source, payload)
+                    )
+                    # Cek apakah benar-benar tersimpan (bukan duplikat)
+                    cursor = self.conn.execute(
+                        "SELECT changes()"
+                    )
+                    changes = cursor.fetchone()[0]
+                    return changes > 0
+            except Exception as e:
+                print("DB Error:", e)
+                return False
+
+    def get_events(self, topic=None):
+        query = "SELECT topic, event_id, timestamp, source, payload FROM events"
+        params = ()
         if topic:
-            cur.execute("SELECT topic, event_id, timestamp, source, payload FROM events_store WHERE topic = ? ORDER BY timestamp ASC", (topic,))
-        else:
-            cur.execute("SELECT topic, event_id, timestamp, source, payload FROM events_store ORDER BY timestamp ASC")
-        rows = cur.fetchall()
-        return rows
+            query += " WHERE topic = ?"
+            params = (topic,)
+        cur = self.conn.execute(query, params)
+        return cur.fetchall()
 
     def get_stats(self):
-        cur = self.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM processed_events")
-        total = cur.fetchone()[0]
-        cur.execute("SELECT DISTINCT topic FROM processed_events")
+        cur = self.conn.execute("SELECT COUNT(*) FROM events")
+        unique_processed = cur.fetchone()[0]
+        cur = self.conn.execute("SELECT DISTINCT topic FROM events")
         topics = [r[0] for r in cur.fetchall()]
-        return {"unique_processed": total, "topics": topics}
+        return {"unique_processed": unique_processed, "topics": topics}
