@@ -3,26 +3,29 @@ version: "3.9"
 services:
   aggregator:
     build: .
-    container_name: uts_aggregator
+    # UBAH DISINI: dari uts_aggregator menjadi uas_aggregator
+    container_name: uas_aggregator
     ports:
       - "8080:8080"
+    volumes:
+      - ./data:/app/data
     networks:
-      - uts_network
+      - uas_network  # Ubah network agar konsisten
     restart: unless-stopped
 
   publisher:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: uts_publisher
+    # UBAH DISINI: dari uts_publisher menjadi uas_publisher
+    container_name: uas_publisher
     command: ["python", "-m", "src.publisher"]
     depends_on:
       - aggregator
     networks:
-      - uts_network
-    environment:
-      - AGGREGATOR_URL=http://aggregator:8080/publish
+      - uas_network # Ubah network agar konsisten
 
 networks:
-  uts_network:
+  # UBAH DISINI: Definisi network baru
+  uas_network:
     driver: bridge

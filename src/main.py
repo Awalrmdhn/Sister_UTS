@@ -5,7 +5,6 @@ import json
 from contextlib import asynccontextmanager
 from typing import List, Union, Optional
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import parse_obj_as
 from src.models import Event, PublishResponse, EventView, Stats
 from src.dedup_store import DedupStore
 from src.consumer import consumer_worker
@@ -15,6 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 QUEUE_SIZE = 10000
 queue: Optional[asyncio.Queue] = None
 dedup_store: Optional[DedupStore] = None
+# Statistik in-memory untuk metrik sementara
 stats = {"received": 0, "duplicate_dropped": 0}
 workers = []
 stop_event = asyncio.Event()
@@ -24,9 +24,11 @@ start_time = time.time()
 async def lifespan(app: FastAPI):
     global queue, dedup_store, workers, stop_event
     queue = asyncio.Queue(maxsize=QUEUE_SIZE)
+    # Pastikan folder data ada via volume docker atau lokal
     dedup_store = DedupStore(db_path="data/dedup.db")
     stop_event.clear()
 
+    # Worker Count 4 (Untuk uji konkurensi POIN D)
     worker_count = 4
     loop = asyncio.get_event_loop()
     for i in range(worker_count):
@@ -34,24 +36,22 @@ async def lifespan(app: FastAPI):
         task = loop.create_task(consumer_worker(name, queue, dedup_store, stats, stop_event))
         workers.append(task)
     logging.info("Startup complete. Workers: %d", worker_count)
+    
     yield
+    
+    # Graceful shutdown
     stop_event.set()
     for t in workers:
-        try:
-            if not t.done():
-                t.cancel()
-        except RuntimeError:
-            pass
+        if not t.done():
+            t.cancel()
     logging.info("Shutdown complete.")
 
-app = FastAPI(title="UTS Pub-Sub Aggregator", lifespan=lifespan)
-
+app = FastAPI(title="UAS Pub-Sub Aggregator", lifespan=lifespan)
 
 @app.post("/publish", response_model=PublishResponse)
 async def publish(payload: Union[Event, List[Event]]):
     """
-    Accept single Event or a list of Event objects (batch).
-    Validated via Pydantic models.
+    Menerima single atau batch event.
     """
     global stats, queue
     events = payload if isinstance(payload, list) else [payload]
@@ -60,18 +60,19 @@ async def publish(payload: Union[Event, List[Event]]):
     enqueued = 0
     for ev in events:
         try:
+            # Put event ke queue internal (in-memory broker)
             await queue.put(ev) 
             enqueued += 1
         except asyncio.QueueFull:
+            # Strategi backpressure sederhana
             raise HTTPException(status_code=503, detail="Queue is full")
+            
     return PublishResponse(received=len(events), enqueued=enqueued)
-
 
 @app.get("/events", response_model=List[EventView])
 async def get_events(topic: Optional[str] = Query(None)):
     """
-    Return list of processed unique events.
-    If 'topic' provided, filter by topic.
+    Mengembalikan daftar event unik yang tersimpan di DB.
     """
     rows = dedup_store.get_events(topic)
     results = []
@@ -91,6 +92,11 @@ async def get_events(topic: Optional[str] = Query(None)):
 
 @app.get("/stats", response_model=Stats)
 async def get_stats():
+    """
+    Mengembalikan statistik performa.
+    unique_processed diambil dari DB (Persisten).
+    received & duplicate_dropped adalah counter in-memory sejak restart terakhir.
+    """
     up_seconds = int(time.time() - start_time)
     ds = dedup_store.get_stats()
     return Stats(
