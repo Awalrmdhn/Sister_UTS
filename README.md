@@ -37,6 +37,12 @@ GET	/stats	Menampilkan statistik pemrosesan event.	{ "received": 5000, "unique_p
 
 
 
+instruksi run singkat:
+Build: docker build -t uts-aggregator .
+Run: docker run -p 8080:8080 uts-aggregator
+
+
+
 🧪 Unit Testing
 Pengujian dilakukan menggunakan pytest, httpx, dan asgi_lifespan untuk mensimulasikan lifecycle aplikasi.
 
